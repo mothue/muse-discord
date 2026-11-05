@@ -1,0 +1,19 @@
+{
+  "name": "muse-discord",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 bun run src/server.ts",
+    "test": "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
