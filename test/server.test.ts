@@ -25,6 +25,11 @@ async function connect(token = GOOD_TOKEN, db = dbPath) {
       DISCORD_BOT_TOKEN: token,
       DISCORD_MCP_DB: db,
       DISCORD_API_BASE: fake.base,
+      DISCORD_CDN_BASE: fake.cdn,
+      TWEMOJI_BASE: fake.twemoji,
+      DISCORD_MCP_MEDIA_DIR: `${dbPath}.media`,
+      WAKE_SPOOL_PATH: `${dbPath}.wake.jsonl`,
+      WAKE_CURSOR_PATH: `${dbPath}.wake-cursor.json`,
     },
     stderr: "pipe",
   });
@@ -53,11 +58,14 @@ afterEach(async () => {
 afterAll(() => rmSync(`${ROOT}${TEST_DIR}`, { recursive: true, force: true }));
 
 describe("startup and tool list", () => {
-  test("tools/list exposes the 8 tools", async () => {
+  test("tools/list exposes all tools", async () => {
     const c = await connect();
     const { tools } = await c.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["add_reaction", "get_messages", "list_channels", "list_unread", "mark_read", "reply_message", "send_message", "whoami"].sort(),
+      [
+        "add_reaction", "fetch_attachment", "get_avatar", "get_emoji", "get_messages", "list_channels", "list_unread",
+        "mark_read", "reply_message", "send_message", "send_typing", "wake_ack", "wake_pending", "whoami",
+      ].sort(),
     );
   });
 
@@ -124,7 +132,7 @@ describe("list_unread / mark_read", () => {
     fake.post(IDS.times, HUMAN, `hello <@${BOT.id}>`, undefined, { mentions: [BOT] });
     fake.post(IDS.times, BOT, "my own post");
     fake.post(IDS.times, HUMAN, "second", undefined, {
-      attachments: [{ filename: "a.png", content_type: "image/png" }],
+      attachments: [{ id: "777", filename: "a.png", content_type: "image/png", size: 10, width: 4, height: 3 }],
       reactions: [{ count: 1, me: false, emoji: { id: null, name: "👍" } }, { count: 2, me: true, emoji: { id: "123", name: "party" } }],
     });
 
@@ -140,7 +148,7 @@ describe("list_unread / mark_read", () => {
     expect(m1).toMatchObject({ author_id: HUMAN.id, author_name: "Mose", author_is_bot: false, mentions_bot: true, reply_to_message_id: null });
     expect(m1.timestamp).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
     expect(m2.mentions_bot).toBe(false);
-    expect(m2.attachments).toEqual([{ filename: "a.png", content_type: "image/png" }]);
+    expect(m2.attachments).toEqual([{ id: "777", filename: "a.png", content_type: "image/png", size: 10, width: 4, height: 3 }]);
     expect(m2.reactions).toEqual([{ emoji: "👍", count: 1, me: false }, { emoji: "party:123", count: 2, me: true }]);
 
     // reading alone does not mark as read
@@ -264,7 +272,7 @@ describe("sending", () => {
     const c = await connect();
     const r = await call(c, "send_message", { channel_id: IDS.times, content: "@everyone hi" });
     expect(r.isError).toBe(false);
-    expect(Object.keys(r.data).sort()).toEqual(["channel_id", "message_id", "timestamp"]);
+    expect(Object.keys(r.data).sort()).toEqual(["channel_id", "message_id", "message_ids", "timestamp"]);
     const post = fake.requests.find((x) => x.method === "POST")!;
     expect(post.body.allowed_mentions).toEqual({ parse: ["users"] });
 
@@ -300,9 +308,9 @@ describe("sending", () => {
     expect(fake.reactions.map((r) => r.emoji)).toEqual(["👍", "party:123", "dance:456"]);
   });
 
-  test("rejects content over 2000 chars", async () => {
+  test("rejects content that would split into more than 10 messages", async () => {
     const c = await connect();
-    const r = (await c.callTool({ name: "send_message", arguments: { channel_id: IDS.times, content: "x".repeat(2001) } })) as any;
+    const r = (await c.callTool({ name: "send_message", arguments: { channel_id: IDS.times, content: "x".repeat(20001) } })) as any;
     expect(r.isError).toBe(true);
     expect(fake.requests.some((x) => x.method === "POST")).toBe(false);
   });
@@ -330,5 +338,186 @@ describe("missing token", () => {
     const c = await connect("");
     const r = await call(c, "whoami");
     expect(r.data.error.code).toBe("MISSING_TOKEN");
+  });
+});
+
+// ---- v3: readable content, replies, media, typing, splitting, wake spool ----
+import { existsSync as exists, readFileSync as readFile, mkdirSync as mkdir, appendFileSync as append } from "node:fs";
+import { dirname as dirOf } from "node:path";
+import { BOT_ROLE } from "./fake-discord.ts";
+
+async function callRaw(client: Client, name: string, args: Record<string, unknown> = {}) {
+  return (await client.callTool({ name, arguments: args })) as {
+    isError?: boolean;
+    content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[];
+  };
+}
+
+describe("readable content and reply context", () => {
+  test("mentions, roles, channels, custom emoji and timestamps become readable", async () => {
+    const c = await connect();
+    fake.post(IDS.times, HUMAN, `hi <@${BOT.id}> <@&${BOT_ROLE}> see <#${IDS.times}> <:party:123> <t:0:R>`, undefined, { mentions: [BOT] });
+    fake.post(IDS.times, HUMAN, "plain");
+    const msgs = (await call(c, "get_messages", { channel_id: IDS.times, limit: 2 })).data;
+    expect(msgs[0].content_readable).toBe("hi @minerva-bot @Agent see #times-mose :party: 1970-01-01T00:00:00.000Z");
+    expect(msgs[1].content_readable).toBeUndefined(); // only when different
+  });
+
+  test("replies include an excerpt of the replied-to message", async () => {
+    const c = await connect();
+    const q = fake.post(IDS.times, HUMAN, "what is " + "x".repeat(300));
+    await call(c, "reply_message", { channel_id: IDS.times, message_id: q.id, content: "answer" });
+    const [msg] = (await call(c, "get_messages", { channel_id: IDS.times, limit: 1 })).data;
+    expect(msg.reply_to_message_id).toBe(q.id);
+    expect(msg.reply_to.author_id).toBe(HUMAN.id);
+    expect(msg.reply_to.author_name).toBe("Mose");
+    expect(Array.from(msg.reply_to.content as string).length).toBe(201); // 200 + "…"
+  });
+});
+
+describe("splitting", () => {
+  test("send_message splits over 2000 chars on line boundaries", async () => {
+    const c = await connect();
+    const text = Array.from({ length: 60 }, (_, i) => `line ${i} ` + "y".repeat(50)).join("\n"); // ~3500 chars
+    const r = await call(c, "send_message", { channel_id: IDS.times, content: text });
+    expect(r.data.message_ids).toHaveLength(2);
+    expect(r.data.message_id).toBe(r.data.message_ids[0]);
+    const posts = fake.requests.filter((x) => x.method === "POST").map((x) => x.body.content as string);
+    expect(posts.every((p) => p.length <= 2000)).toBe(true);
+    expect(posts.join("\n")).toBe(text);
+    expect(fake.requests.filter((x) => x.method === "POST").every((x) => x.body.allowed_mentions.parse.length <= 1)).toBe(true);
+  });
+
+  test("reply_message: only the first part is a reply", async () => {
+    const c = await connect();
+    const q = fake.post(IDS.times, HUMAN, "q");
+    const r = await call(c, "reply_message", { channel_id: IDS.times, message_id: q.id, content: "z".repeat(4500) });
+    expect(r.data.message_ids).toHaveLength(3);
+    const posts = fake.requests.filter((x) => x.method === "POST");
+    expect(posts[0]!.body.message_reference.message_id).toBe(q.id);
+    expect(posts.slice(1).every((p) => p.body.message_reference === undefined)).toBe(true);
+    expect(posts.map((p) => p.body.content).join("")).toBe("z".repeat(4500));
+  });
+});
+
+describe("media", () => {
+  test("fetch_attachment downloads into the media dir and returns the image inline over MCP", async () => {
+    const c = await connect();
+    const m = fake.post(IDS.times, HUMAN, "look", undefined, {
+      attachments: [
+        { id: "501", filename: "cat photo.png", content_type: "image/png", size: 20, url: `${fake.cdn}/attachments/1/501/cat.png?ex=1`, width: 10, height: 8 },
+        { id: "502", filename: "notes.txt", content_type: "text/plain", size: 5, url: `${fake.cdn}/attachments/1/502/notes.txt` },
+      ],
+    });
+    const r = await callRaw(c, "fetch_attachment", { channel_id: IDS.times, message_id: m.id });
+    expect(r.isError).toBeFalsy();
+    const data = JSON.parse((r.content[0] as any).text);
+    expect(data.files).toHaveLength(2);
+    const [img, txt] = data.files;
+    expect(img).toMatchObject({ attachment_id: "501", filename: "cat photo.png", content_type: "image/png", width: 10, height: 8, cached: false });
+    expect(img.path).toStartWith(ROOT); // inside the working directory
+    expect(img.path).toEndWith("attachments/501-cat_photo.png");
+    expect(exists(img.path)).toBe(true);
+    expect(txt.content_type).toBe("text/plain");
+    // Only the image is inlined
+    const images = r.content.filter((x) => x.type === "image") as any[];
+    expect(images).toHaveLength(1);
+    expect(images[0].mimeType).toBe("image/png");
+    expect(Buffer.from(images[0].data, "base64").equals(readFile(img.path))).toBe(true);
+    // The token is never sent to the CDN
+    expect(fake.cdnRequests.every((x) => !x.auth)).toBe(true);
+
+    // Second call is served from the local file
+    const again = JSON.parse(((await callRaw(c, "fetch_attachment", { channel_id: IDS.times, message_id: m.id, attachment_id: "501" })).content[0] as any).text);
+    expect(again.files).toHaveLength(1);
+    expect(again.files[0].cached).toBe(true);
+  });
+
+  test("fetch_attachment on a message without attachments is NOT_FOUND", async () => {
+    const c = await connect();
+    const m = fake.post(IDS.times, HUMAN, "no files");
+    const r = await call(c, "fetch_attachment", { channel_id: IDS.times, message_id: m.id });
+    expect(r.data.error.code).toBe("NOT_FOUND");
+  });
+
+  test("get_emoji renders Unicode emoji via Twemoji (FE0F rules) and custom emoji via the CDN", async () => {
+    const c = await connect();
+    const thumbs = await callRaw(c, "get_emoji", { emoji: "👍" });
+    expect(JSON.parse((thumbs.content[0] as any).text)).toMatchObject({ kind: "unicode", codepoints: "1f44d", content_type: "image/png" });
+    expect(thumbs.content.some((x) => x.type === "image")).toBe(true);
+
+    const heart = (await call(c, "get_emoji", { emoji: "❤️" })).data; // U+2764 U+FE0F -> 2764
+    expect(heart.codepoints).toBe("2764");
+    const coder = (await call(c, "get_emoji", { emoji: "👨‍💻" })).data; // ZWJ sequence
+    expect(coder.codepoints).toBe("1f468-200d-1f4bb");
+
+    for (const input of ["<:party:123456789012345678>", "party:123456789012345678", "123456789012345678"]) {
+      const d = (await call(c, "get_emoji", { emoji: input })).data;
+      expect(d).toMatchObject({ kind: "custom", id: "123456789012345678" });
+    }
+    expect((await call(c, "get_emoji", { emoji: "<a:dance:223456789012345678>" })).data.animated).toBe(true);
+    expect(fake.cdnRequests.map((x) => x.path)).toContain("/twemoji/1f44d.png");
+    expect(fake.cdnRequests.map((x) => x.path)).toContain("/cdn/emojis/123456789012345678.png?size=128");
+
+    expect((await call(c, "get_emoji", { emoji: "hello" })).data.error.code).toBe("INVALID_ARGUMENT");
+  });
+
+  test("get_avatar prefers the guild avatar, then the user avatar, then the default", async () => {
+    const c = await connect();
+    fake.users.set(HUMAN.id, { ...HUMAN, avatar: "abc123" });
+    fake.members.set(HUMAN.id, { roles: [], avatar: "guildhash", nick: "Mo" });
+    const g = (await call(c, "get_avatar", { user_id: HUMAN.id, size: 128 })).data;
+    expect(g).toMatchObject({ user_id: HUMAN.id, display_name: "Mo", source: "guild", content_type: "image/png" });
+    expect(fake.cdnRequests.at(-1)!.path).toBe(`/cdn/guilds/${GUILD_ID}/users/${HUMAN.id}/avatars/guildhash.png?size=128`);
+
+    fake.members.delete(HUMAN.id);
+    const u = await callRaw(c, "get_avatar", { user_id: HUMAN.id });
+    expect(JSON.parse((u.content[0] as any).text)).toMatchObject({ source: "user", display_name: "Mose" });
+    expect(fake.cdnRequests.at(-1)!.path).toBe(`/cdn/avatars/${HUMAN.id}/abc123.png?size=256`);
+    expect(u.content.some((x) => x.type === "image")).toBe(true);
+
+    fake.users.set(BOT.id, { ...BOT, avatar: null });
+    const idx = (BigInt(BOT.id) >> 22n) % 6n;
+    const d = (await call(c, "get_avatar", { user_id: BOT.id })).data;
+    if (idx === 0n) expect(d.error.code).toBe("NOT_FOUND"); // fake CDN 404s on 0.png
+    else expect(d).toMatchObject({ source: "default", is_bot: true });
+
+    expect((await callRaw(c, "get_avatar", { user_id: HUMAN.id, size: 100 })).isError).toBe(true); // rejected by schema
+    expect((await call(c, "get_avatar", { user_id: "123" })).data.error.code).toBe("NOT_FOUND");
+  });
+});
+
+describe("typing", () => {
+  test("send_typing posts the typing indicator", async () => {
+    const c = await connect();
+    expect((await call(c, "send_typing", { channel_id: IDS.times })).data).toEqual({ ok: true });
+    expect(fake.typing).toEqual([IDS.times]);
+  });
+});
+
+describe("wake spool", () => {
+  test("wake_pending reads unacked events; wake_ack advances the cursor; partial lines are ignored", async () => {
+    const c = await connect();
+    expect((await call(c, "wake_pending")).data).toEqual({ events: [], remaining: 0 });
+
+    const spool = `${ROOT}${dbPath}.wake.jsonl`;
+    mkdir(dirOf(spool), { recursive: true });
+    const ev = (id: string) => JSON.stringify({ reason: "mention", message_id: id, channel_id: IDS.times, content: "日本語 ok" }) + "\n";
+    append(spool, ev("1001") + ev("1002") + ev("1003"));
+    append(spool, '{"reason":"mention","message_id":"1004"'); // still being written
+
+    const p1 = (await call(c, "wake_pending", { limit: 2 })).data;
+    expect(p1.events.map((e: any) => e.message_id)).toEqual(["1001", "1002"]);
+    expect(p1.remaining).toBe(1);
+
+    expect((await call(c, "wake_ack", { up_to_message_id: "1002" })).data).toEqual({ acked: 2, remaining: 1 });
+    expect((await call(c, "wake_pending")).data.events.map((e: any) => e.message_id)).toEqual(["1003"]);
+
+    append(spool, ',"channel_id":"1"}\n');
+    expect((await call(c, "wake_pending")).data.events.map((e: any) => e.message_id)).toEqual(["1003", "1004"]);
+    expect((await call(c, "wake_ack", { up_to_message_id: "9999" })).data.error.code).toBe("NOT_FOUND");
+    await call(c, "wake_ack", { up_to_message_id: "1004" });
+    expect((await call(c, "wake_pending")).data).toEqual({ events: [], remaining: 0 });
+    expect(exists(`${ROOT}${dbPath}.wake-cursor.json`)).toBe(true);
   });
 });

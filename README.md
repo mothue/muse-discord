@@ -30,7 +30,16 @@ bun run start                                         # no args: MCP stdio serve
 
 The CLI prints JSON to stdout. Exit code is 0 on success and 1 on error, with `{"error":{"code","message","status"}}`. Logs go to stderr.
 
-Tools: `whoami`, `list_channels`, `list_unread`, `mark_read`, `get_messages`, `send_message`, `reply_message`, `add_reaction`.
+| Tool | |
+|---|---|
+| `whoami`, `list_channels` | bot / channel info |
+| `list_unread`, `mark_read`, `get_messages` | read (`content_readable` resolves mentions/emoji/timestamps; replies carry `reply_to`) |
+| `send_message`, `reply_message` | write; over 2000 chars is split automatically (code blocks kept) |
+| `add_reaction`, `send_typing` | react / show "typing…" |
+| `fetch_attachment`, `get_emoji`, `get_avatar` | download to `./data/media/` and return the local path (MCP also returns the image inline) |
+| `wake_pending`, `wake_ack` | consume events spooled by `listen` |
+
+Unicode emoji are rendered with Twemoji, which is what Discord shows. The bot token is never sent to the CDN.
 
 ## Read flow
 

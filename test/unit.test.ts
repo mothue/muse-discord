@@ -53,3 +53,47 @@ test("snowflakeFromTime uses the Discord epoch", () => {
   expect(snowflakeFromTime(1420070400000)).toBe("0");
   expect(snowflakeFromTime(1420070400001)).toBe((1n << 22n).toString());
 });
+
+import { parseEmoji, splitMessage, twemojiCode } from "../src/media.ts";
+
+describe("splitMessage", () => {
+  test("short text is untouched", () => {
+    expect(splitMessage("hello")).toEqual(["hello"]);
+  });
+  test("never exceeds the limit and keeps all text (hard cut without spaces)", () => {
+    const s = "a".repeat(5000);
+    const parts = splitMessage(s);
+    expect(parts.every((p) => p.length <= 2000)).toBe(true);
+    expect(parts.join("")).toBe(s);
+  });
+  test("does not split surrogate pairs", () => {
+    const s = "😀".repeat(1500); // 3000 UTF-16 units
+    const parts = splitMessage(s);
+    expect(parts.every((p) => p.length <= 2000 && !/[\ud800-\udbff]$/.test(p))).toBe(true);
+    expect(parts.join("")).toBe(s);
+  });
+  test("closes and reopens code fences across chunks", () => {
+    const code = Array.from({ length: 200 }, (_, i) => `const v${i} = ${i};`).join("\n");
+    const parts = splitMessage("intro\n```ts\n" + code + "\n```\noutro");
+    expect(parts.length).toBeGreaterThan(1);
+    for (const p of parts) {
+      expect(p.length).toBeLessThanOrEqual(2000);
+      expect((p.match(/^```/gm) ?? []).length % 2).toBe(0); // balanced in every chunk
+    }
+    expect(parts[1]!.startsWith("```ts\n")).toBe(true);
+  });
+});
+
+describe("emoji parsing", () => {
+  test("twemoji code points", () => {
+    expect(twemojiCode("👍")).toBe("1f44d");
+    expect(twemojiCode("❤️")).toBe("2764");
+    expect(twemojiCode("👨‍💻")).toBe("1f468-200d-1f4bb");
+    expect(twemojiCode("🇯🇵")).toBe("1f1ef-1f1f5");
+  });
+  test("custom emoji forms", () => {
+    expect(parseEmoji("<a:dance:123456789012345678>")).toEqual({ kind: "custom", animated: true, name: "dance", id: "123456789012345678" });
+    expect(parseEmoji(":party:123")).toEqual({ kind: "custom", animated: false, name: "party", id: "123" });
+    expect(() => parseEmoji("abc")).toThrow();
+  });
+});

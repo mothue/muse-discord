@@ -34,6 +34,12 @@ export class FakeDiscord {
   private seq = 0n;
   /** URL returned by GET /gateway/bot */
   gatewayUrl?: string;
+  /** Users for GET /users/{id} and members for GET /guilds/{g}/members/{id} */
+  users = new Map<string, DUser>();
+  members = new Map<string, { roles: string[]; avatar?: string | null; nick?: string | null }>();
+  /** CDN requests (path + whether an Authorization header was sent) */
+  cdnRequests: { path: string; auth: boolean }[] = [];
+  typing: string[] = [];
 
   constructor() {
     const everyoneDeny = { id: GUILD_ID, type: 0 as const, allow: "0", deny: VIEW.toString() };
@@ -53,6 +59,12 @@ export class FakeDiscord {
 
   get base() {
     return `http://127.0.0.1:${this.server.port}/api/v10`;
+  }
+  get cdn() {
+    return `http://127.0.0.1:${this.server.port}/cdn`;
+  }
+  get twemoji() {
+    return `http://127.0.0.1:${this.server.port}/twemoji`;
   }
   stop() {
     this.server.stop(true);
@@ -99,6 +111,13 @@ export class FakeDiscord {
 
   private async handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
+    // Fake CDN / Twemoji: no auth, serves a tiny PNG whose bytes include the path
+    if (url.pathname.startsWith("/cdn/") || url.pathname.startsWith("/twemoji/")) {
+      this.cdnRequests.push({ path: url.pathname + url.search, auth: req.headers.has("authorization") });
+      if (url.pathname.includes("missing") || url.pathname.endsWith("/0.png")) return new Response("nope", { status: 404 });
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode(url.pathname)]);
+      return new Response(png, { headers: { "content-type": "image/png" } });
+    }
     const path = url.pathname.replace(/^\/api\/v10/, "");
     const body = req.method === "GET" || req.method === "PUT" ? undefined : await req.json().catch(() => undefined);
     this.requests.push({ method: req.method, path: path + url.search, body });
@@ -124,11 +143,27 @@ export class FakeDiscord {
         name: "test-guild",
         owner_id: HUMAN.id,
         roles: [
-          { id: GUILD_ID, permissions: (VIEW | HISTORY | SEND).toString() },
-          { id: BOT_ROLE, permissions: "0" },
+          { id: GUILD_ID, name: "@everyone", permissions: (VIEW | HISTORY | SEND).toString() },
+          { id: BOT_ROLE, name: "Agent", permissions: "0" },
         ],
       });
     if (path === `/guilds/${GUILD_ID}/members/${BOT.id}`) return this.json({ roles: [BOT_ROLE] });
+    if ((m = path.match(new RegExp(`^/guilds/${GUILD_ID}/members/(\\d+)$`)))) {
+      const mem = this.members.get(m[1]!);
+      return mem ? this.json(mem) : this.json({ message: "Unknown Member", code: 10007 }, 404);
+    }
+    if ((m = path.match(/^\/users\/(\d+)$/))) {
+      const u = this.users.get(m[1]!);
+      return u ? this.json(u) : this.json({ message: "Unknown User", code: 10013 }, 404);
+    }
+    if ((m = path.match(/^\/channels\/(\d+)\/typing$/)) && req.method === "POST") {
+      this.typing.push(m[1]!);
+      return new Response(null, { status: 204 });
+    }
+    if ((m = path.match(/^\/channels\/(\d+)\/messages\/(\d+)$/)) && req.method === "GET") {
+      const msg = this.messages.get(m[1]!)?.find((x) => x.id === m![2]);
+      return msg ? this.json(msg) : this.json({ message: "Unknown Message", code: 10008 }, 404);
+    }
     if (path === `/guilds/${GUILD_ID}/channels`) return this.json(this.channels);
     if (path === `/guilds/${GUILD_ID}/threads/active`) return this.json({ threads: this.threads, members: [] });
 
@@ -148,6 +183,7 @@ export class FakeDiscord {
         if (body.message_reference) {
           extra.type = 19;
           extra.message_reference = body.message_reference;
+          extra.referenced_message = list.find((x) => x.id === body.message_reference.message_id) ?? null;
         }
         return this.json(this.post(cid, BOT, body.content, this.nextId(), extra));
       }

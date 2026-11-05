@@ -10,7 +10,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { StateDB } from "./db.ts";
 import { DiscordClient, ToolError } from "./discord.ts";
-import { createTools, type ToolDef } from "./tools.ts";
+import { WithImages, createTools, type ToolDef } from "./tools.ts";
+import { readFileSync } from "node:fs";
 import { resolveInsideCwd } from "./paths.ts";
 
 // Keep stdout clean: route console.log / info to stderr
@@ -31,10 +32,18 @@ function toError(e: unknown): ToolError {
   return new ToolError("INTERNAL_ERROR", (e as Error)?.message ?? String(e));
 }
 
-async function runTool(tool: ToolDef, args: unknown): Promise<{ ok: boolean; text: string }> {
+interface RunResult {
+  ok: boolean;
+  text: string;
+  images?: { path: string; mimeType: string }[];
+}
+
+async function runTool(tool: ToolDef, args: unknown): Promise<RunResult> {
   try {
     const parsed = z.object(tool.inputSchema).strict().parse(args ?? {});
-    return { ok: true, text: JSON.stringify(await tool.handler(parsed)) };
+    const out = await tool.handler(parsed);
+    if (out instanceof WithImages) return { ok: true, text: JSON.stringify(out.data), images: out.images };
+    return { ok: true, text: JSON.stringify(out) };
   } catch (e) {
     const err = toError(e);
     console.error(`[tool] ${err.code}: ${err.message}`);
@@ -108,7 +117,7 @@ if (argv.length > 0) {
     process.exit(0);
   }
   const tool = tools[name!];
-  let result: { ok: boolean; text: string };
+  let result: RunResult;
   if (!tool) {
     result = { ok: false, text: JSON.stringify(new ToolError("INVALID_ARGUMENT", `unknown tool: ${name} (try: help)`).toJSON()) };
   } else {
@@ -127,7 +136,12 @@ const server = new McpServer({ name: "muse-discord", version: "0.1.0" });
 for (const [name, tool] of Object.entries(tools)) {
   server.registerTool(name, { description: tool.description, inputSchema: tool.inputSchema }, async (args: unknown) => {
     const r = await runTool(tool, args);
-    return { ...(r.ok ? {} : { isError: true }), content: [{ type: "text" as const, text: r.text }] };
+    const images = (r.images ?? []).map((img) => ({
+      type: "image" as const,
+      data: readFileSync(img.path).toString("base64"),
+      mimeType: img.mimeType,
+    }));
+    return { ...(r.ok ? {} : { isError: true }), content: [{ type: "text" as const, text: r.text }, ...images] };
   });
 }
 

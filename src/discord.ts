@@ -67,6 +67,7 @@ export interface DUser {
   username: string;
   global_name?: string | null;
   bot?: boolean;
+  avatar?: string | null;
 }
 export interface DOverwrite {
   id: string;
@@ -87,6 +88,7 @@ export interface DChannel {
 }
 export interface DRole {
   id: string;
+  name?: string;
   permissions: string;
 }
 export interface DGuild {
@@ -97,6 +99,9 @@ export interface DGuild {
 }
 export interface DMember {
   roles: string[];
+  avatar?: string | null;
+  nick?: string | null;
+  user?: DUser;
 }
 export interface DMessage {
   id: string;
@@ -106,10 +111,20 @@ export interface DMessage {
   timestamp: string;
   mentions: DUser[];
   mention_roles: string[];
-  attachments: { filename: string; content_type?: string }[];
+  attachments: DAttachment[];
   reactions?: { count: number; me: boolean; emoji: { id: string | null; name: string | null } }[];
   message_reference?: { message_id?: string; channel_id?: string };
+  referenced_message?: DMessage | null;
   type: number;
+}
+export interface DAttachment {
+  id: string;
+  filename: string;
+  content_type?: string;
+  size?: number;
+  url?: string;
+  width?: number | null;
+  height?: number | null;
 }
 
 function sleep(ms: number) {
@@ -230,6 +245,15 @@ export class DiscordClient {
     if (q.before) p.set("before", q.before);
     if (q.after) p.set("after", q.after);
     return this.request<DMessage[]>("GET", `/channels/${channelId}/messages?${p}`);
+  }
+  message(channelId: string, messageId: string) {
+    return this.request<DMessage>("GET", `/channels/${channelId}/messages/${messageId}`);
+  }
+  user(userId: string) {
+    return this.request<DUser>("GET", `/users/${userId}`);
+  }
+  typing(channelId: string) {
+    return this.request<void>("POST", `/channels/${channelId}/typing`);
   }
   createMessage(channelId: string, payload: unknown) {
     return this.request<DMessage>("POST", `/channels/${channelId}/messages`, payload);
