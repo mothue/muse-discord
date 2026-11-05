@@ -2,15 +2,16 @@
 // Entry point.
 //   bun run start                  -> MCP server over stdio (stdout = JSON-RPC only)
 //   bun run start <tool> [args]    -> run one tool, print JSON to stdout, exit
+//   bun run start listen           -> stay on the Gateway, append triggers to a JSONL spool
 // Logs always go to stderr.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { isAbsolute, relative, resolve } from "node:path";
 import { z } from "zod";
 import { StateDB } from "./db.ts";
 import { DiscordClient, ToolError } from "./discord.ts";
 import { createTools, type ToolDef } from "./tools.ts";
+import { resolveInsideCwd } from "./paths.ts";
 
 // Keep stdout clean: route console.log / info to stderr
 console.log = console.error;
@@ -21,15 +22,7 @@ const DEFAULT_GUILD_ID = process.env.DISCORD_MCP_DEFAULT_GUILD_ID?.trim() || "15
 
 /** Side effects (the DB file) are confined to the working directory. */
 function resolveDbPath(): string {
-  const raw = process.env.DISCORD_MCP_DB?.trim() || "./data/state.sqlite";
-  const cwd = process.cwd();
-  const abs = resolve(cwd, raw);
-  const rel = relative(cwd, abs);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-    console.error(`[config] DISCORD_MCP_DB must be inside the working directory: ${raw}`);
-    process.exit(1);
-  }
-  return abs;
+  return resolveInsideCwd(process.env.DISCORD_MCP_DB?.trim() || "./data/state.sqlite", "DISCORD_MCP_DB");
 }
 
 function toError(e: unknown): ToolError {
@@ -87,7 +80,7 @@ function parseCliArgs(tool: ToolDef, argv: string[]): Record<string, unknown> {
 }
 
 function usage(tools: Record<string, ToolDef>): string {
-  const lines = ["Usage: bun run start <tool> [--option value ...] | [JSON]", "       bun run start            (MCP stdio server)", "", "Tools:"];
+  const lines = ["Usage: bun run start <tool> [--option value ...] | [JSON]", "       bun run start            (MCP stdio server)", "       bun run start listen     (Gateway listener -> wake spool)", "", "Tools:"];
   for (const [name, t] of Object.entries(tools)) {
     const opts = Object.entries(t.inputSchema).map(([k, s]) => ((s as z.ZodType).isOptional() ? `[--${k}]` : `--${k}`));
     lines.push(`  ${name} ${opts.join(" ")}`.trimEnd(), `      ${t.description}`);
@@ -98,6 +91,13 @@ function usage(tools: Record<string, ToolDef>): string {
 // ---- main ----
 
 const argv = process.argv.slice(2);
+
+// listen is CLI-only and must not open the SQLite DB (watermarks stay untouched)
+if (argv[0] === "listen") {
+  const { runListen } = await import("./listen.ts");
+  await runListen();
+}
+
 const db = new StateDB(resolveDbPath());
 const tools = createTools({ db, discord: new DiscordClient(TOKEN), defaultGuildId: DEFAULT_GUILD_ID });
 

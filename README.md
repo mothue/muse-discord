@@ -40,6 +40,30 @@ Tools: `whoami`, `list_channels`, `list_unread`, `mark_read`, `get_messages`, `s
 
 Channels and threads created after the first run are read from their first message.
 
+## Listen (Gateway)
+
+```sh
+bun run start listen   # long-running; stop with SIGINT/SIGTERM
+```
+
+Stays connected to the Gateway (intents `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT`). For each `MESSAGE_CREATE` in the guild that is not from the bot itself, it appends one JSON line to the spool when the message:
+
+- mentions the bot (`reason: "mention"`)
+- mentions the Agent role (`reason: "role_mention"`)
+- is in a watched channel, with or without a mention (`reason: "watched_channel"`)
+
+Line format: `{reason, message_id, channel_id, guild_id, author_id, author_name, content (max 500 chars), timestamp, detected_at}`. Logs go to stdout as JSON Lines. Listen mode never touches the SQLite watermarks.
+
+The session and the last 1000 message ids are kept in the state file, so a restart resumes the session and nothing is spooled twice.
+
+| Env | Default |
+|---|---|
+| `DISCORD_GUILD_ID` | `1513823779124416582` |
+| `AGENT_ROLE_ID` | `1567703605514084353` |
+| `WAKE_CHANNEL_IDS` | `1567704255312429208` (comma-separated) |
+| `WAKE_SPOOL_PATH` | `./data/wake-events.jsonl` |
+| `LISTEN_STATE_PATH` | `./data/listen-state.json` |
+
 ## Test
 
 ```sh

@@ -32,6 +32,8 @@ export class FakeDiscord {
   /** Channels that return 403 (visible by permission calc, but rejected by the API) */
   forbiddenChannels = new Set<string>();
   private seq = 0n;
+  /** URL returned by GET /gateway/bot */
+  gatewayUrl?: string;
 
   constructor() {
     const everyoneDeny = { id: GUILD_ID, type: 0 as const, allow: "0", deny: VIEW.toString() };
@@ -111,6 +113,11 @@ export class FakeDiscord {
 
     let m: RegExpMatchArray | null;
     if (path === "/users/@me") return this.json(BOT);
+    if (path === "/gateway/bot") {
+      return this.gatewayUrl
+        ? this.json({ url: this.gatewayUrl, shards: 1, session_start_limit: { remaining: 1000 } })
+        : this.json({ message: "unavailable" }, 500);
+    }
     if (path === `/guilds/${GUILD_ID}`)
       return this.json({
         id: GUILD_ID,
